@@ -4,4 +4,6 @@ node_modules/
 # private preview data and screenshots (personal data), not part of the repository
 test/fixtures/live.json
 screenshots/vorschau-*
-dashboard-snippet.yaml
+dashboard-snippet*.yaml
+screenshots/live-*
+screenshots/fortschritt-*

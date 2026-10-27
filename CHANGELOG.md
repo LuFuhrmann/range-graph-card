@@ -4,6 +4,18 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.1.0] – 2026-10-27
+
+### Added
+- Statistics-only series: `statistic_id` without `entity` (top level or per entry) charts a long-term statistic directly, with `stat_type` (`mean`, `min`, `max`, `sum`, `state`, `change`) and `period` (`auto`, `5minute`, `hour`, `day`, `week`, `month`). Name and unit come from `recorder/get_statistics_metadata`; the card reloads such series every 30 minutes.
+- `target`: labelled dashed target line; `target_band`: labelled target range. Both accept numbers or entity IDs (e.g. `input_number`) and are kept inside the y axis.
+- `chart_type: bar`: one bar per statistics period, highlighted when it reaches the target in the `good_direction`; the tooltip names the period (e.g. *Week of Mon, 26.10.2026*).
+- `show_change` to hide the change line, `target_label` to rename the target label.
+- `empty_link`: button in the empty hint that navigates to a dashboard path.
+
+### Changed
+- The "entity not found" message only appears for a configured entity that is missing, not for statistics-only cards.
+
 ## [1.0.0] – 2026-10-27
 
 ### Added

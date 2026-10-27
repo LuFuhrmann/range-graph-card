@@ -32,6 +32,25 @@ export function demoFixture(now = Date.now(), retentionDays = 10) {
     if (r() < 0.3) raw.push([t + 13 * H, Math.round((w + 0.6 + r() * 0.8) * 20) / 20]);
     t += (1 + Math.floor(r() * 3)) * D;
   }
+  // Statistics-only demo series (treadmill sessions, training days per week), hourly rows.
+  const treadMin = [], treadKmh = [], days = [];
+  const monday = (tt) => { const d = new Date(tt); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() - ((d.getDay() + 6) % 7)); return d.getTime(); };
+  let week = monday(now - 26 * 7 * D);
+  while (week <= now) {
+    let n = 0;
+    for (const off of [0, 2, 4]) {
+      const day = new Date(week); day.setDate(day.getDate() + off); day.setHours(18, 0, 0, 0);
+      if (day.getTime() > now - H || r() < 0.3) continue;
+      n++;
+      const progress = 1 - (now - day.getTime()) / (182 * D);
+      treadMin.push({ start: day.getTime(), end: day.getTime() + H, mean: Math.round(10 + 6 * progress + r() * 4), max: 0 });
+      treadKmh.push({ start: day.getTime(), end: day.getTime() + H, mean: Math.round((8.4 + 1.2 * progress + r() * 0.6) * 10) / 10 });
+    }
+    const noon = week + 12 * H;
+    if (noon < now) days.push({ start: noon, end: noon + H, mean: n });
+    week = new Date(week).setDate(new Date(week).getDate() + 7);
+  }
+  treadMin.forEach((x) => { x.max = x.mean; });
   const bmi = official.map(([tt, w]) => [tt, Math.round((w / 1.83 ** 2) * 10) / 10]);
   const cut = now - retentionDays * D;
   const hist = (pts) => pts.filter(([tt]) => tt >= cut).map(([tt, v]) => ({ s: String(v), lu: tt / 1000 }));
@@ -39,11 +58,18 @@ export function demoFixture(now = Date.now(), retentionDays = 10) {
   return {
     language: "de",
     history: { "sensor.weight": hist(official), "sensor.bmi": hist(bmi), "sensor.scale_raw": hist(raw) },
-    statistics: { "sensor.weight": hourly(official, now), "sensor.bmi": hourly(bmi, now), "sensor.scale_raw": hourly(raw, now) },
+    statistics: { "sensor.weight": hourly(official, now), "sensor.bmi": hourly(bmi, now), "sensor.scale_raw": hourly(raw, now),
+      "demo:treadmill_min": treadMin, "demo:treadmill_kmh": treadKmh, "demo:training_days": days },
+    meta: [
+      { statistic_id: "demo:treadmill_min", name: "Treadmill duration", statistics_unit_of_measurement: "min", display_unit_of_measurement: "min" },
+      { statistic_id: "demo:treadmill_kmh", name: "Treadmill speed", statistics_unit_of_measurement: "km/h", display_unit_of_measurement: "km/h" },
+      { statistic_id: "demo:training_days", name: "Training days", statistics_unit_of_measurement: "d", display_unit_of_measurement: "d" },
+    ],
     states: {
       "sensor.weight": state("sensor.weight", official, "Weight", "kg"),
       "sensor.bmi": state("sensor.bmi", bmi, "BMI", "kg/m²"),
       "sensor.scale_raw": state("sensor.scale_raw", raw, "Scale (raw)", "kg"),
+      "input_number.treadmill_goal": { entity_id: "input_number.treadmill_goal", state: "15.0", last_changed: new Date(now).toISOString(), attributes: { friendly_name: "Goal", unit_of_measurement: "min" } },
       "sensor.empty": { entity_id: "sensor.empty", state: "unknown", last_changed: new Date(now).toISOString(), attributes: { friendly_name: "Body fat", unit_of_measurement: "%" } },
     },
   };

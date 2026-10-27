@@ -73,15 +73,35 @@ function mockSource() {
         }
         return out;
       }
+      if (msg.type === "recorder/get_statistics_metadata") {
+        return (fixture.meta || []).filter((m) => msg.statistic_ids.includes(m.statistic_id));
+      }
       if (msg.type === "recorder/statistics_during_period") {
+        // Aggregate hourly rows like the recorder: buckets per period, local time, weeks start on Monday.
+        const bucket = (t) => {
+          const d = new Date(t);
+          if (msg.period === "hour") { d.setMinutes(0, 0, 0); return [d.getTime(), d.getTime() + 3600e3]; }
+          d.setHours(0, 0, 0, 0);
+          if (msg.period === "week") d.setDate(d.getDate() - ((d.getDay() + 6) % 7));
+          if (msg.period === "month") d.setDate(1);
+          const e = new Date(d);
+          if (msg.period === "day") e.setDate(e.getDate() + 1);
+          if (msg.period === "week") e.setDate(e.getDate() + 7);
+          if (msg.period === "month") e.setMonth(e.getMonth() + 1);
+          return [d.getTime(), e.getTime()];
+        };
         const out = {};
         for (const id of msg.statistic_ids) {
-          let rows = (fixture.statistics[id] || []).filter((r) => r.start >= start - 3600e3 && r.start < end);
-          if (msg.period === "day") {
-            const days = new Map();
-            for (const r of rows) { const d = new Date(r.start); d.setHours(0, 0, 0, 0); const k = d.getTime(); (days.get(k) || days.set(k, []).get(k)).push(r.mean); }
-            rows = [...days].map(([k, v]) => { const e = new Date(k); e.setDate(e.getDate() + 1); return { start: k, end: e.getTime(), mean: v.reduce((a, b) => a + b, 0) / v.length }; });
+          const groups = new Map();
+          for (const r of fixture.statistics[id] || []) {
+            const [s0, e0] = bucket(r.start);
+            if (e0 <= start || s0 >= end) continue;
+            (groups.get(s0) || groups.set(s0, { start: s0, end: e0, vals: [], maxs: [] }).get(s0)).vals.push(r.mean);
           }
+          const rows = [...groups.values()].sort((a, b) => a.start - b.start).map((g) => ({
+            start: g.start, end: g.end, mean: g.vals.reduce((a, b) => a + b, 0) / g.vals.length,
+            min: Math.min(...g.vals), max: Math.max(...g.vals), state: g.vals.at(-1),
+          }));
           if (rows.length) out[id] = rows;
         }
         return out;
@@ -221,6 +241,39 @@ if (prefix === "vorschau") {
     check("single point drawn", (await card(page, 1).locator("circle").count()) >= 1);
     check("two series", (await card(page, 2).locator("path.line").count()) === 2);
     check("no errors", errors.length === 0, errors.join(" | "));
+    await ctx.close();
+  }
+  {
+    // v1.1: statistics-only series, target line and band, bar chart, empty link.
+    const cards11 = [
+      { entity: undefined, statistic_id: "demo:treadmill_min", title: "Treadmill duration", period: "day", stat_type: "max", target: "input_number.treadmill_goal", good_direction: "up", decimals: 0, ranges: ["1m", "3m", "6m", "all"], default_range: "3m" },
+      { statistic_id: "demo:treadmill_kmh", title: "Treadmill speed", period: "day", target_band: [9, 10], decimals: 1, ranges: ["1m", "3m", "6m", "all"], default_range: "3m" },
+      { statistic_id: "demo:training_days", title: "Training days per week", chart_type: "bar", period: "week", target: 3, good_direction: "up", show_change: false, decimals: 0, ranges: ["3m", "6m", "1y", "all"], default_range: "6m" },
+    ];
+    for (const theme of ["hell", "dunkel"]) {
+      const { page, ctx, errors } = await setup(theme, cards11);
+      await page.screenshot({ path: `${outDir}/${prefix}-${theme}-5-ziele-balken.png`, fullPage: true });
+      check(`${theme}: target line labelled`, /Ziel 15 min/.test(await card(page, 0).locator(".target-label").first().textContent()));
+      check(`${theme}: target band labelled`, (await card(page, 1).locator("rect.target-band").count()) === 1 && /Ziel 9–10 km\/h/.test(await card(page, 1).locator(".target-label").first().textContent()));
+      const bars = await card(page, 2).locator("rect.bar").count();
+      const hits = await card(page, 2).locator("rect.bar.hit").count();
+      check(`${theme}: weekly bars, goal weeks highlighted`, bars >= 20 && hits > 0 && hits < bars, `${bars} bars, ${hits} hit`);
+      check(`${theme}: unit and name from metadata`, /min$/.test((await text(page, ".value", 0)).trim()), await text(page, ".value", 0));
+      check(`${theme}: no change line for bars`, (await text(page, ".change", 2)) === "");
+      await page.mouse.move(0, 0);
+      await card(page, 2).locator(".chart").scrollIntoViewIfNeeded();
+      const box = await card(page, 2).locator(".chart").boundingBox();
+      await page.mouse.move(box.x + box.width * 0.5, box.y + box.height / 2); await page.waitForTimeout(100);
+      check(`${theme}: bar tooltip shows the week`, /Woche ab/.test(await text(page, ".tip", 2)), await text(page, ".tip", 2));
+      await card(page, 2).screenshot({ path: `${outDir}/${prefix}-${theme}-6-balken-tooltip.png` });
+      check(`${theme}: no errors (v1.1)`, errors.length === 0, errors.join(" | "));
+      await ctx.close();
+    }
+    const { page, ctx, errors } = await setup("hell", [{ entity: "sensor.empty", title: "Waist", empty_link: { text: "Enter waist", navigation_path: "/demo/values" } }]);
+    await card(page).locator("button.link").click();
+    await page.waitForTimeout(100);
+    check("empty link navigates", (await page.evaluate(() => location.pathname)) === "/demo/values");
+    check("no errors (empty link)", errors.length === 0, errors.join(" | "));
     await ctx.close();
   }
 }

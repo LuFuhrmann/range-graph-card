@@ -3,7 +3,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   parseRange, rangeStart, historyToPoints, statisticsToPoints, mergeSeries,
-  xDomain, yDomain, niceTicks, timeTicks, valueAt, dailyMeans, computeChange,
+  xDomain, yDomain, niceTicks, timeTicks, valueAt, dailyMeans, computeChange, statisticRowsToPoints, resolveTarget, autoPeriod,
 } from "../range-graph-card.js";
 
 const H = 3600e3, D = 24 * H;
@@ -95,4 +95,31 @@ test("computeChange: raw value vs. daily mean basis", () => {
   const one = computeChange(pts.slice(0, 2), t, 67, "daily_mean");
   assert.equal(one.diff, null, "one day only: neutral");
   assert.equal(one.mean, 66.5);
+});
+
+test("statisticRowsToPoints picks the statistic type and keeps one point per period", () => {
+  const t0 = now - 21 * D;
+  const rows = [0, 1, 2].map((i) => ({ start: t0 + i * 7 * D, end: t0 + (i + 1) * 7 * D, mean: 2, max: 3 + i }));
+  const bars = statisticRowsToPoints(rows, "mean", "week");
+  assert.equal(bars.length, 3, "no collapsing for bars");
+  assert.deepEqual(bars[0], { t: t0, v: 2, end: t0 + 7 * D, stat: "week" });
+  assert.equal(statisticRowsToPoints(rows, "mean", "week", true).length, 1, "collapsed for lines");
+  assert.deepEqual(statisticRowsToPoints(rows, "max", "week").map((p) => p.v), [3, 4, 5]);
+  assert.equal(statisticRowsToPoints([{ start: t0 }], "sum").length, 0, "missing type is skipped");
+  assert.equal(statisticRowsToPoints([{ start: t0, mean: 1 }], "mean", "day")[0].end, t0 + D, "end from period when missing");
+});
+
+test("resolveTarget accepts numbers, entity IDs, bands and objects", () => {
+  const states = { "input_number.goal": { state: "15.0" }, "input_number.lo": { state: "9" }, "input_number.bad": { state: "unknown" } };
+  assert.deepEqual(resolveTarget(15), { lo: 15, hi: 15 });
+  assert.deepEqual(resolveTarget("input_number.goal", states), { lo: 15, hi: 15 });
+  assert.deepEqual(resolveTarget([10, "input_number.lo"], states), { lo: 9, hi: 10 });
+  assert.deepEqual(resolveTarget({ min: 9, max: 10 }), { lo: 9, hi: 10 });
+  assert.equal(resolveTarget("input_number.bad", states), null);
+  assert.equal(resolveTarget(undefined), null);
+});
+
+test("autoPeriod uses hours up to 100 days, days beyond", () => {
+  assert.equal(autoPeriod(30 * D), "hour");
+  assert.equal(autoPeriod(365 * D), "day");
 });

@@ -1,9 +1,9 @@
-/*! range-graph-card v1.0.0 | MIT License | https://github.com/LuFuhrmann/range-graph-card */
+/*! range-graph-card v1.1.0 | MIT License | https://github.com/LuFuhrmann/range-graph-card */
 // A Home Assistant Lovelace card that shows the history of one or more numeric
 // entities as a step chart with stock-app style range buttons (1W, 1M, 3M, ...).
 // No build step and no runtime dependencies: this file is the whole card.
 
-export const VERSION = "1.0.0";
+export const VERSION = "1.1.0";
 
 const HOUR = 3600e3;
 const DAY = 24 * HOUR;
@@ -18,6 +18,7 @@ const STRINGS = {
     error: "Could not load history", updated: "Updated", noEntity: "Entity not found",
     dailyMean: "Daily mean", oneDay: "only 1 day so far", mean: "Ø",
     meanHint: "Ø = change of the daily mean: last vs. first day with data",
+    target: "Target", weekOf: "Week of", openInput: "Enter values",
   },
   de: {
     units: { h: "Std", d: "T", w: "W", m: "M", y: "J" }, all: "Alle",
@@ -25,6 +26,7 @@ const STRINGS = {
     error: "Verlauf konnte nicht geladen werden", updated: "Stand", noEntity: "Entität nicht gefunden",
     dailyMean: "Tagesmittel", oneDay: "erst 1 Tag", mean: "Ø",
     meanHint: "Ø = Veränderung des Tagesmittels: letzter gegenüber erstem Tag mit Daten",
+    target: "Ziel", weekOf: "Woche ab", openInput: "Werte eintragen",
   },
 };
 
@@ -195,6 +197,45 @@ export function computeChange(points, x0, current, basis = "value") {
   return base == null || !Number.isFinite(current) ? null : { diff: current - base, since: x0 };
 }
 
+/** Nominal length of a statistics period (week and month are approximate, only used for widths). */
+export const PERIOD_MS = { "5minute": 5 * 60e3, hour: HOUR, day: DAY, week: 7 * DAY, month: 30 * DAY };
+const STAT_TYPES = ["mean", "min", "max", "sum", "state", "change"];
+
+/** Statistics period used when none is configured. */
+export function autoPeriod(span) { return span > 100 * DAY ? "day" : "hour"; }
+
+/**
+ * Statistics rows -> one point {t, v, end, stat} per period, using the chosen statistic type.
+ * `collapse` merges consecutive equal values (fine for step lines, not for bars).
+ */
+export function statisticRowsToPoints(rows, type = "mean", period = "hour", collapse = false) {
+  const out = [];
+  for (const r of rows || []) {
+    const v = r[type];
+    const t = toMs(r.start);
+    if (v == null || !Number.isFinite(v) || !Number.isFinite(t)) continue;
+    const end = r.end != null ? toMs(r.end) : t + (PERIOD_MS[period] || HOUR);
+    if (collapse && out.length && out[out.length - 1].v === v) continue;
+    out.push({ t, v, end, stat: period });
+  }
+  return out;
+}
+
+/**
+ * Target value or band -> {lo, hi} or null. Accepts a number, an entity ID (its state is used),
+ * [min, max] or {min, max}; every bound may be a number or an entity ID.
+ */
+export function resolveTarget(target, states) {
+  const val = (x) => (typeof x === "string" && /^[a-z_]+\.[a-z0-9_]+$/.test(x) ? Number.parseFloat(states?.[x]?.state) : Number(x));
+  if (target == null || target === "") return null;
+  if (Array.isArray(target) || typeof target === "object") {
+    const [a, b] = (Array.isArray(target) ? target : [target.min, target.max]).map(val);
+    return Number.isFinite(a) && Number.isFinite(b) ? { lo: Math.min(a, b), hi: Math.max(a, b) } : null;
+  }
+  const v = val(target);
+  return Number.isFinite(v) ? { lo: v, hi: v } : null;
+}
+
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 
 // ---------------------------------------------------------------- card
@@ -219,11 +260,17 @@ export class RangeGraphCard extends Base {
   }
 
   setConfig(config) {
-    if (!config || (!config.entity && !config.entities)) throw new Error("range-graph-card: set `entity` or `entities`.");
-    const list = config.entities ? [].concat(config.entities) : [{ entity: config.entity, name: config.name }];
+    if (!config || (!config.entity && !config.entities && !config.statistic_id)) throw new Error("range-graph-card: set `entity`, `statistic_id` or `entities`.");
+    const list = config.entities ? [].concat(config.entities) : [{ entity: config.entity, statistic_id: config.statistic_id, name: config.name }];
     const entities = list.map((e, i) => {
       const o = typeof e === "string" ? { entity: e } : { ...e };
-      if (!o.entity) throw new Error("range-graph-card: every entry in `entities` needs an `entity`.");
+      if (!o.entity && !o.statistic_id) throw new Error("range-graph-card: every entry in `entities` needs an `entity` or a `statistic_id`.");
+      if (!o.entity) {
+        o.stat_type = o.stat_type || config.stat_type || "mean";
+        o.period = o.period || config.period || "auto";
+        if (!STAT_TYPES.includes(o.stat_type)) throw new Error(`range-graph-card: \`stat_type\` is one of ${STAT_TYPES.join(", ")}.`);
+        if (o.period !== "auto" && !PERIOD_MS[o.period]) throw new Error("range-graph-card: `period` is auto, 5minute, hour, day, week or month.");
+      }
       o.color = o.color || PALETTE[i % PALETTE.length];
       return o;
     });
@@ -231,12 +278,13 @@ export class RangeGraphCard extends Base {
     if (!ranges.length || ranges.some((r) => !r)) throw new Error("range-graph-card: `ranges` entries look like 1d, 2w, 3m, 1y or all.");
     this._config = {
       height: 200, statistics: true, show_points: "auto", good_direction: "none", show_updated: true,
-      change_basis: "value", trend_line: "none",
+      change_basis: "value", trend_line: "none", chart_type: "line", show_change: true,
       ...config, entities, ranges,
     };
+    if (!["line", "bar"].includes(this._config.chart_type)) throw new Error("range-graph-card: `chart_type` is line or bar.");
     if (!["value", "daily_mean"].includes(this._config.change_basis)) throw new Error("range-graph-card: `change_basis` is value or daily_mean.");
     if (!["none", "daily_mean"].includes(this._config.trend_line)) throw new Error("range-graph-card: `trend_line` is none or daily_mean.");
-    this._storageKey = `range-graph-card:${config.storage_key || entities.map((e) => e.entity).join(",") + "|" + (config.title ?? "")}`;
+    this._storageKey = `range-graph-card:${config.storage_key || entities.map((e) => e.entity || e.statistic_id).join(",") + "|" + (config.title ?? "")}`;
     let saved = null;
     try { saved = globalThis.localStorage?.getItem(this._storageKey); } catch (_) { /* private mode */ }
     const pick = [saved, config.default_range, "1m"].map((k) => k && ranges.find((r) => r.key === String(k).toLowerCase())).find(Boolean);
@@ -255,7 +303,13 @@ export class RangeGraphCard extends Base {
       const lc = hass.states[e.entity]?.last_changed;
       if (lc && this._lastChanged[e.entity] !== lc) { if (this._lastChanged[e.entity]) changed = true; this._lastChanged[e.entity] = lc; }
     }
+    // Targets given as entity IDs: redraw the chart when one of them changes.
+    const tIds = [this._config.target, ...[].concat(this._config.target_band ?? [])].filter((x) => typeof x === "string");
+    const tKey = tIds.map((id) => hass.states[id]?.state).join("|");
+    const targetChanged = this._targetKey !== undefined && this._targetKey !== tKey;
+    this._targetKey = tKey;
     if (first || !this._data) this._load();
+    else if (targetChanged && !changed) { this._renderHeader(); this._renderChart(); }
     else if (changed) { clearTimeout(this._reloadTimer); this._reloadTimer = setTimeout(() => this._load(), 1000); }
     else this._renderHeader();
   }
@@ -266,7 +320,12 @@ export class RangeGraphCard extends Base {
       if (w && w !== this._width) { this._width = w; this._renderChart(); }
     });
     if (this._built) this._ro.observe(this.shadowRoot.querySelector(".chart"));
-    this._tick = setInterval(() => { if (this._data) { this._data.now = Date.now(); this._renderChart(); } }, 5 * 60e3);
+    this._tick = setInterval(() => {
+      if (!this._data) return;
+      // Statistics have no state changes to listen to: reload them every 30 minutes.
+      if (this._config.entities.some((e) => !e.entity) && Date.now() - this._data.loaded > 30 * 60e3) this._load();
+      else { this._data.now = Date.now(); this._renderChart(); }
+    }, 5 * 60e3);
     if (this._hass && this._config && !this._data) this._load();
   }
 
@@ -292,33 +351,46 @@ export class RangeGraphCard extends Base {
     const id = ++this._fetchId;
     const now = Date.now();
     const start = rangeStart(this._range, now);
-    const ids = this._config.entities.map((e) => e.entity);
+    const ents = this._config.entities;
     this._loading = true;
     this._build();
     this._renderStatus();
     try {
       const iso = (t) => new Date(t).toISOString();
-      const historyP = this._hass.callWS({
-        type: "history/history_during_period", start_time: iso(start), end_time: iso(now),
-        entity_ids: ids, minimal_response: true, no_attributes: true, significant_changes_only: false,
-      });
-      const statIds = this._config.entities.map((e) => e.statistic_id || e.entity);
-      const period = now - start > 100 * DAY ? "day" : "hour";
-      const statsP = this._config.statistics
-        ? this._hass.callWS({
-          type: "recorder/statistics_during_period", start_time: iso(start), end_time: iso(now),
-          statistic_ids: statIds, period, types: ["mean", "state"],
-        }).catch(() => ({}))
+      const call = (msg) => this._hass.callWS({ start_time: iso(start), end_time: iso(now), ...msg });
+      const histIds = ents.filter((e) => e.entity).map((e) => e.entity);
+      const historyP = histIds.length
+        ? call({ type: "history/history_during_period", entity_ids: histIds, minimal_response: true, no_attributes: true, significant_changes_only: false })
         : Promise.resolve({});
-      const [history, stats] = await Promise.all([historyP, statsP]);
+      // Entities: long-term statistics only fill the time before the recorder history.
+      const period = autoPeriod(now - start);
+      const mixed = this._config.statistics ? ents.filter((e) => e.entity) : [];
+      const mixedP = mixed.length
+        ? call({ type: "recorder/statistics_during_period", statistic_ids: mixed.map((e) => e.statistic_id || e.entity), period, types: ["mean", "state"] }).catch(() => ({}))
+        : Promise.resolve({});
+      // Statistics-only series: the configured type and period.
+      const periodOf = (e) => (e.period === "auto" ? autoPeriod(now - start) : e.period);
+      const onlyP = Promise.all(ents.map((e) => (e.entity ? null
+        : call({ type: "recorder/statistics_during_period", statistic_ids: [e.statistic_id], period: periodOf(e), types: [e.stat_type] }))));
+      const metaIds = ents.filter((e) => !e.entity && !this._meta?.[e.statistic_id]).map((e) => e.statistic_id);
+      const metaP = metaIds.length
+        ? this._hass.callWS({ type: "recorder/get_statistics_metadata", statistic_ids: metaIds }).catch(() => [])
+        : Promise.resolve([]);
+      const [history, stats, only, meta] = await Promise.all([historyP, mixedP, onlyP, metaP]);
       if (id !== this._fetchId) return;
-      const series = this._config.entities.map((e, i) => {
+      this._meta = this._meta || {};
+      for (const m of meta || []) this._meta[m.statistic_id] = m;
+      const series = ents.map((e, i) => {
+        if (!e.entity) {
+          const pts = statisticRowsToPoints(only[i]?.[e.statistic_id], e.stat_type, periodOf(e), this._config.chart_type !== "bar");
+          return this._config.chart_type === "bar" ? pts : mergeSeries({ statistics: pts, start });
+        }
         const raw = history?.[e.entity] || [];
         const historyFirst = raw.length ? toMs(raw[0].lc ?? raw[0].lu ?? raw[0].last_changed) : Infinity;
-        return mergeSeries({ history: historyToPoints(raw), statistics: statisticsToPoints(stats?.[statIds[i]], historyFirst, period), start });
+        return mergeSeries({ history: historyToPoints(raw), statistics: statisticsToPoints(stats?.[e.statistic_id || e.entity], historyFirst, period), start });
       });
-      const raw = this._config.entities.map((e) => (history?.[e.entity] || []).map((x) => x.s));
-      this._data = { series, raw, start, now };
+      const raw = ents.map((e, i) => (e.entity ? (history?.[e.entity] || []).map((x) => x.s) : series[i].map((p) => String(p.v))));
+      this._data = { series, raw, start, now, loaded: now };
       this._error = null;
     } catch (err) {
       if (id !== this._fetchId) return;
@@ -355,17 +427,25 @@ export class RangeGraphCard extends Base {
   }
   _unit(i = 0) {
     const e = this._config.entities[i];
-    return e.unit ?? this._config.unit ?? this._hass?.states[e.entity]?.attributes?.unit_of_measurement ?? "";
+    return e.unit ?? this._config.unit ?? this._hass?.states[e.entity]?.attributes?.unit_of_measurement
+      ?? this._meta?.[e.statistic_id]?.display_unit_of_measurement ?? this._meta?.[e.statistic_id]?.statistics_unit_of_measurement ?? "";
   }
   _name(i = 0) {
     const e = this._config.entities[i];
-    return e.name ?? this._hass?.states[e.entity]?.attributes?.friendly_name ?? e.entity;
+    return e.name ?? this._hass?.states[e.entity]?.attributes?.friendly_name ?? this._meta?.[e.statistic_id]?.name ?? e.entity ?? e.statistic_id;
   }
   _date(t, opts) { return new Intl.DateTimeFormat(this._locale, opts).format(new Date(t)); }
   _dateTime(t, dateOnly = false) {
     const time = dateOnly ? {} : { hour: "2-digit", minute: "2-digit" };
     return this._date(t, { weekday: "short", day: "2-digit", month: "2-digit", year: "numeric", ...time });
   }
+  /** Label of a point's time: its period for statistics, otherwise date and time. */
+  _when(p) {
+    if (p.stat === "week") return `${this._strings.weekOf} ${this._dateTime(p.t, true)}`;
+    if (p.stat === "month") return this._date(p.t, { month: "long", year: "numeric" });
+    return this._dateTime(p.t, p.stat === "day");
+  }
+  _target(key) { return resolveTarget(this._config[key], this._hass?.states); }
   _withUnit(text, i) { const u = this._unit(i); return u ? `${text}\u00a0${u}` : text; }
 
   // ------------------------------------------------------------ rendering
@@ -426,12 +506,13 @@ export class RangeGraphCard extends Base {
     const pts = this._data?.series[0] || [];
     let cur = Number.parseFloat(st?.state);
     if (!Number.isFinite(cur)) cur = pts.length ? pts[pts.length - 1].v : NaN;
-    root.querySelector(".value").textContent = Number.isFinite(cur) ? this._withUnit(this._fmt(cur), 0) : (st ? "–" : S.noEntity);
+    const missing = cfg.entities[0].entity && !st;
+    root.querySelector(".value").textContent = Number.isFinite(cur) ? this._withUnit(this._fmt(cur), 0) : (missing ? S.noEntity : "–");
 
     const change = root.querySelector(".change");
     change.className = "change";
     change.textContent = "";
-    if (pts.length && Number.isFinite(cur) && this._data) {
+    if (cfg.show_change && pts.length && Number.isFinite(cur) && this._data) {
       const [x0] = xDomain(this._data.series, this._data.start, this._data.now);
       const daily = cfg.change_basis === "daily_mean";
       const ch = computeChange(pts, x0, cur, cfg.change_basis);
@@ -449,8 +530,9 @@ export class RangeGraphCard extends Base {
       change.title = daily ? S.meanHint : "";
     }
     const last = pts.length ? pts[pts.length - 1] : null;
-    root.querySelector(".updated").textContent = cfg.show_updated && last && !last.carried
-      ? `${S.updated} ${this._date(last.t, { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}` : "";
+    const lastLabel = !last ? "" : last.stat && last.stat !== "hour" && last.stat !== "5minute" ? this._when(last)
+      : this._date(last.t, { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+    root.querySelector(".updated").textContent = cfg.show_updated && last && !last.carried ? `${S.updated} ${lastLabel}` : "";
   }
 
   _renderStatus() {
@@ -462,7 +544,12 @@ export class RangeGraphCard extends Base {
     if (this._error) text = `${S.error}: ${this._error}`;
     else if (!this._data && this._loading) text = S.loading;
     else if (empty) text = `${S.noData} ${this._config.entities.map((_, i) => this._name(i)).join(", ")}`;
-    el.textContent = text;
+    const link = empty && !this._error ? this._config.empty_link : null;
+    el.innerHTML = `<span>${esc(text)}</span>${link?.navigation_path ? `<button type="button" class="link">${esc(link.text || S.openInput)}</button>` : ""}`;
+    el.querySelector(".link")?.addEventListener("click", () => {
+      history.pushState(null, "", link.navigation_path);
+      window.dispatchEvent(new CustomEvent("location-changed", { detail: { replace: false } }));
+    });
     el.hidden = !text;
     this.shadowRoot.querySelector(".chart").classList.toggle("busy", this._loading && !!this._data);
   }
@@ -475,9 +562,20 @@ export class RangeGraphCard extends Base {
     const { series, start, now } = this._data;
     if (series.every((s) => !s.length)) { host.innerHTML = ""; this._geo = null; return; }
 
-    const [x0, x1] = xDomain(series, start, now);
+    const bar = this._config.chart_type === "bar";
+    let [x0, x1] = xDomain(series, start, now);
+    if (bar) {
+      // Whole bars: start at the first period that reaches into the range, end with the last period.
+      const first = Math.min(...series.flatMap((s) => s.filter((p) => (p.end ?? p.t) > start).map((p) => p.t)));
+      if (Number.isFinite(first)) x0 = Math.min(x0, first);
+      x1 = Math.max(x1, ...series.flatMap((s) => s.map((p) => p.end ?? p.t)));
+    }
+    const line = this._target("target");
+    const band = this._target("target_band");
     const visible = series.flatMap((s) => [valueAt(s, x0), ...s.filter((p) => p.t >= x0).map((p) => p.v)]).filter((v) => v != null);
-    const [y0, y1] = yDomain(visible, this._config.min, this._config.max);
+    const targets = [line, band].filter(Boolean).flatMap((r) => [r.lo, r.hi]);
+    let [y0, y1] = yDomain([...visible, ...targets, ...(bar ? [0] : [])], this._config.min, this._config.max);
+    if (bar && this._config.min == null && y0 < 0 && Math.min(...visible) >= 0) y0 = 0;
     const { ticks: yt, step } = niceTicks(y0, y1, Math.max(2, Math.floor(H / 40)));
     const td = Math.max(0, -Math.floor(Math.log10(step) + 1e-9));
     const yLabels = yt.map((v) => new Intl.NumberFormat(this._locale, { minimumFractionDigits: td, maximumFractionDigits: td }).format(v).replace("-", "\u2212"));
@@ -487,7 +585,7 @@ export class RangeGraphCard extends Base {
     const ph = Math.max(10, H - pad.t - pad.b);
     const X = (t) => pad.l + ((t - x0) / (x1 - x0)) * pw;
     const Y = (v) => pad.t + (1 - (v - y0) / (y1 - y0)) * ph;
-    this._geo = { X, Y, x0, x1, pad, pw };
+    this._geo = { X, Y, x0, x1, pad, pw, bar };
 
     let svg = `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" aria-hidden="true">`;
     svg += `<defs><clipPath id="clip"><rect x="${pad.l - 6}" y="${pad.t - 6}" width="${pw + 12}" height="${ph + 12}"/></clipPath>`;
@@ -511,9 +609,42 @@ export class RangeGraphCard extends Base {
       svg += `<text class="axis" x="${x}" y="${H - 6}" text-anchor="${anchor}">${esc(label)}</text>`;
     });
 
+    const label = this._config.target_label ?? this._strings.target;
+    const tUnit = this._unit(0);
+    const fmtT = (v) => new Intl.NumberFormat(this._locale, { maximumFractionDigits: 2 }).format(v);
+    const tlabel = (text, yTop, yBottom) => {
+      const y = yTop - 5 > pad.t + 8 ? yTop - 5 : yBottom + 13;
+      return `<text class="target-label" x="${pad.l + 4}" y="${y}">${esc(text)}</text>`;
+    };
+    if (band) {
+      const top = Y(band.hi), bottom = Y(band.lo);
+      svg += `<rect class="target-band" x="${pad.l}" y="${top}" width="${pw}" height="${Math.max(2, bottom - top)}"/>`;
+      svg += tlabel(`${label} ${fmtT(band.lo)}–${fmtT(band.hi)}${tUnit ? ` ${tUnit}` : ""}`, top, bottom);
+    }
+    if (line) {
+      svg += `<line class="target-line" x1="${pad.l}" x2="${pad.l + pw}" y1="${Y(line.lo)}" y2="${Y(line.lo)}"/>`;
+      svg += tlabel(`${label} ${fmtT(line.lo)}${tUnit ? ` ${tUnit}` : ""}`, Y(line.lo), Y(line.lo));
+    }
+
     const single = series.filter((s) => s.length).length === 1;
     svg += `<g clip-path="url(#clip)">`;
-    series.forEach((pts, i) => {
+    if (bar) {
+      const good = this._config.good_direction;
+      const goal = line || band;
+      series.forEach((pts, i) => {
+        const n = series.filter((s) => s.length).length;
+        pts.filter((p) => (p.end ?? p.t) > x0).forEach((p) => {
+          const a = X(Math.max(p.t, x0)), b = X(Math.min(p.end ?? p.t + DAY, x1));
+          const slot = (b - a) / n;
+          const w = Math.max(2, slot * 0.72);
+          const x = a + slot * i + (slot - w) / 2;
+          const yv = Y(Math.max(p.v, 0)), yz = Y(Math.min(Math.max(0, y0), y1));
+          const hit = goal && ((good === "up" && p.v >= goal.lo) || (good === "down" && p.v <= goal.hi));
+          svg += `<rect class="bar${hit ? " hit" : ""}" x="${x}" y="${Math.min(yv, yz)}" width="${w}" height="${Math.max(1, Math.abs(yz - yv))}" rx="3" fill="${this._config.entities[i].color}"/>`;
+        });
+      });
+    }
+    if (!bar) series.forEach((pts, i) => {
       if (!pts.length) return;
       const color = this._config.entities[i].color;
       const startV = valueAt(pts, x0);
@@ -552,7 +683,7 @@ export class RangeGraphCard extends Base {
     const { X, Y, x0 } = this._geo;
     let best = null;
     this._data.series.forEach((pts, i) => pts.forEach((p) => {
-      const t = Math.max(p.t, x0);
+      const t = this._geo.bar ? (Math.max(p.t, x0) + Math.min(p.end ?? p.t, this._geo.x1)) / 2 : Math.max(p.t, x0);
       const dx = Math.abs(X(t) - px);
       if (!best || dx < best.dx) best = { dx, p, i, t };
     }));
@@ -573,7 +704,7 @@ export class RangeGraphCard extends Base {
       const day = dailyMeans(this._data.series[best.i], x0).find((m) => m.day === dayKey(best.p.t));
       if (day) mean = `<br><span class="mean">${esc(`${this._strings.dailyMean} ${this._withUnit(this._fmt(day.v, best.i), best.i)}${day.n > 1 ? ` (${day.n}×)` : ""}`)}</span>`;
     }
-    tip.innerHTML = `<b>${esc(this._withUnit(this._fmt(best.p.v, best.i), best.i))}</b>${multi ? ` <span>${esc(this._name(best.i))}</span>` : ""}<br>${esc(best.p.carried ? `≤ ${this._dateTime(best.t)}` : this._dateTime(best.p.t, best.p.stat === "day"))}${mean}`;
+    tip.innerHTML = `<b>${esc(this._withUnit(this._fmt(best.p.v, best.i), best.i))}</b>${multi ? ` <span>${esc(this._name(best.i))}</span>` : ""}<br>${esc(best.p.carried ? `≤ ${this._dateTime(best.t)}` : this._when(best.p))}${mean}`;
     tip.hidden = false;
     const tw = tip.offsetWidth;
     tip.style.left = `${Math.min(Math.max(cx - tw / 2, 0), rect.width - tw)}px`;
@@ -616,7 +747,14 @@ const STYLE = `
   .dot { fill: var(--card-background-color, var(--ha-card-background, #fff)); stroke-width: 2; }
   .crossline { stroke: var(--secondary-text-color); stroke-width: 1; stroke-dasharray: 2 3; }
   .crossdot { fill: var(--card-background-color, var(--ha-card-background, #fff)); stroke-width: 3; }
-  .status { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; text-align: center; padding: 0 24px; color: var(--secondary-text-color); font-size: 14px; }
+  .status { position: absolute; inset: 0; display: flex; flex-direction: column; gap: 10px; align-items: center; justify-content: center; text-align: center; padding: 0 24px; color: var(--secondary-text-color); font-size: 14px; }
+  .status .link { min-height: 36px; padding: 0 16px; border: none; border-radius: 18px; background: rgba(var(--rgb-primary-color, 3,169,244), .16); color: var(--primary-color); font: inherit; font-weight: 500; cursor: pointer; }
+  .status .link:focus-visible { outline: 2px solid var(--primary-color); outline-offset: 1px; }
+  .target-band { fill: var(--success-color, #43a047); opacity: .13; }
+  .target-line { stroke: var(--success-color, #43a047); stroke-width: 1.5; stroke-dasharray: 6 4; }
+  .target-label { fill: var(--success-color, #43a047); font-size: 11px; font-weight: 500; font-family: inherit; }
+  .bar { opacity: .8; }
+  .bar.hit { fill: var(--success-color, #43a047); }
   .status[hidden], .tip[hidden] { display: none; }
   .tip { position: absolute; pointer-events: none; white-space: nowrap; background: var(--primary-text-color); color: var(--card-background-color, var(--ha-card-background, #fff)); border-radius: 8px; padding: 5px 9px; font-size: 12px; line-height: 17px; box-shadow: 0 2px 6px rgba(0,0,0,.25); }
   .tip b { font-size: 13px; }
