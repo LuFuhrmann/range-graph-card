@@ -1,0 +1,17 @@
+{
+  "name": "range-graph-card",
+  "version": "1.0.0",
+  "description": "Home Assistant Lovelace card: step chart of an entity's history with stock-style range buttons (1W, 1M, 3M, 6M, 1Y, All).",
+  "main": "range-graph-card.js",
+  "type": "module",
+  "scripts": {
+    "test": "TZ=Europe/Berlin node --test test/logic.test.mjs",
+    "screenshots": "node test/render.mjs"
+  },
+  "keywords": ["home-assistant", "lovelace", "hacs", "history", "graph", "custom-card"],
+  "license": "MIT",
+  "private": true,
+  "devDependencies": {
+    "playwright-core": "^1.48.0"
+  }
+}

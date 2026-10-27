@@ -1,0 +1,6 @@
+{
+  "name": "Range Graph Card",
+  "filename": "range-graph-card.js",
+  "render_readme": true,
+  "homeassistant": "2024.1.0"
+}

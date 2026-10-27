@@ -1,0 +1,7 @@
+node_modules/
+*.log
+.DS_Store
+# private preview data and screenshots (personal data), not part of the repository
+test/fixtures/live.json
+screenshots/vorschau-*
+dashboard-snippet.yaml
